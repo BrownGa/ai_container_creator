@@ -1,0 +1,413 @@
+#!/usr/bin/env python3
+"""Sets up an AI devcontainer (Claude Code + Codex) in the current directory."""
+
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+from hashlib import sha256
+from pathlib import Path
+
+
+def slugify(name: str) -> str:
+    slug = re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
+    return slug or 'workspace'
+
+
+def container_name_for(workspace: Path) -> str:
+    slug = slugify(workspace.name)
+    phash = sha256(str(workspace).encode()).hexdigest()[:12]
+    return f"ai-container-{slug}-{phash}"
+
+
+def cmd_remove(workspace: Path) -> None:
+    name = container_name_for(workspace)
+    print(f"[*] Removing container: {name}")
+    subprocess.run(['docker', 'rm', '-f', name], capture_output=True)
+    subprocess.run(['docker', 'rmi', '-f', name], capture_output=True)
+    for item in ['.devcontainer', 'open-terminal.sh', 'container.sh']:
+        path = workspace / item
+        if path.exists():
+            shutil.rmtree(path) if path.is_dir() else path.unlink()
+            print(f"[*] Removed {item}")
+    print("[*] Done.")
+
+
+def main() -> None:
+    workspace = Path.cwd()
+
+    if '--remove' in sys.argv[1:]:
+        cmd_remove(workspace)
+        return
+
+    if (workspace / '.devcontainer' / 'Dockerfile').exists():
+        print(f"[!] Container already set up in this directory.")
+        print(f"    Run with --remove to remove it first.")
+        sys.exit(1)
+
+    container_name = container_name_for(workspace)
+
+    print(f"[*] Project:   {workspace.name}")
+    print(f"[*] Container: {container_name}")
+    print()
+
+    (workspace / '.devcontainer').mkdir(exist_ok=True)
+    (workspace / '.devcontainer' / 'Dockerfile').write_text(DOCKERFILE)
+    (workspace / '.devcontainer' / 'devcontainer.json').write_text(DEVCONTAINER_JSON)
+
+    for filename, content in [('open-terminal.sh', OPEN_TERMINAL_SH), ('container.sh', CONTAINER_SH)]:
+        path = workspace / filename
+        path.write_text(content)
+        path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    subprocess.run(['mkdir', '-p',
+                    os.path.expanduser('~/.claude'),
+                    os.path.expanduser('~/.codex')], check=True)
+
+    print("[*] Created:")
+    print("      .devcontainer/Dockerfile")
+    print("      .devcontainer/devcontainer.json")
+    print("      open-terminal.sh")
+    print("      container.sh")
+    print()
+    print("[*] Usage:")
+    print("      ./open-terminal.sh    — open shell (builds image on first run)")
+    print("      ./container.sh        — interactive menu (start/stop/shell/rebuild)")
+    print("      VS Code: 'Reopen in Container'")
+    print()
+    print("    Up to 3 free ports from 3000-3030 are allocated at container start (none if all taken).")
+
+
+# ── file contents ─────────────────────────────────────────────────────────────
+
+DOCKERFILE = r"""FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    curl wget git \
+    python3 python3-pip python3-venv python3-dev \
+    gcc g++ make cmake build-essential \
+    sudo bash vim nano less \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js 22 (required by Claude Code and Codex)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @anthropic-ai/claude-code @openai/codex
+
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install ipython requests
+
+# cai: claude with all permissions skipped (safe inside this sandbox)
+RUN printf '#!/bin/bash\nexec claude --dangerously-skip-permissions "$@"\n' \
+    > /usr/local/bin/cai && chmod +x /usr/local/bin/cai
+
+# codex: bypass internal approvals/sandbox inside the container
+RUN CODEX_REAL="$(readlink -f "$(command -v codex)")" \
+    && printf '#!/bin/bash\nexec node "%s" --dangerously-bypass-approvals-and-sandbox "$@"\n' "$CODEX_REAL" \
+    > /usr/local/bin/codex && chmod +x /usr/local/bin/codex
+
+# Non-root user (UID 1000) — Claude Code refuses --dangerously-skip-permissions as root
+RUN usermod -l sandbox -d /home/sandbox -m -s /bin/bash ubuntu \
+    && groupmod -n sandbox ubuntu \
+    && echo 'sandbox ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+
+RUN mkdir -p /home/sandbox/.local/bin \
+    && ln -s "$(which claude)" /home/sandbox/.local/bin/claude \
+    && chown -R sandbox:sandbox /home/sandbox/.local
+
+RUN echo 'alias claude="claude --dangerously-skip-permissions"' >> /home/sandbox/.bashrc \
+    && echo 'export PS1="\[\033[1;31m\][sandbox]\[\033[0m\] \w \$ "' >> /home/sandbox/.bashrc
+
+USER sandbox
+WORKDIR /workspace
+"""
+
+DEVCONTAINER_JSON = """{
+  "name": "AI Sandbox",
+  "build": { "dockerfile": "Dockerfile" },
+  "runArgs": ["--cap-add=SYS_PTRACE", "--security-opt", "seccomp=unconfined"],
+  "mounts": [
+    "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.claude,target=/home/sandbox/.claude,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.claude.json,target=/home/sandbox/.claude.json,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.codex,target=/home/sandbox/.codex,type=bind,consistency=cached"
+  ],
+  "workspaceFolder": "/workspace",
+  "forwardPorts": [3000, 3001, 3002, 3003, 3004, 3005, 3006, 3007, 3008, 3009, 3010, 3011, 3012, 3013, 3014, 3015, 3016, 3017, 3018, 3019, 3020, 3021, 3022, 3023, 3024, 3025, 3026, 3027, 3028, 3029, 3030],
+  "remoteUser": "sandbox",
+  "containerEnv": {
+    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+    "OPENAI_API_KEY": "${localEnv:OPENAI_API_KEY}"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python", "ms-python.debugpy", "ms-vscode.cpptools"],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "python.defaultInterpreterPath": "/opt/venv/bin/python3"
+      }
+    }
+  }
+}
+"""
+
+OPEN_TERMINAL_SH = r"""#!/usr/bin/env bash
+# Opens a bash terminal inside this project's AI container (Claude Code + Codex).
+# Builds the image if needed, starts the container if stopped.
+
+set -euo pipefail
+
+WORKSPACE="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_NAME="$(basename "$WORKSPACE")"
+PROJECT_SLUG="$(printf '%s' "$PROJECT_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g; s/-\{2,\}/-/g; s/^-//; s/-$//')"
+PROJECT_SLUG="${PROJECT_SLUG:-workspace}"
+PROJECT_HASH="$(printf '%s' "$WORKSPACE" | sha256sum | cut -c1-12)"
+IMAGE_NAME="ai-container-${PROJECT_SLUG}-${PROJECT_HASH}"
+CONTAINER_NAME="$IMAGE_NAME"
+
+find_free_ports() {
+    local count=$1 found=()
+    for p in $(seq 3000 3030); do
+        if ! ss -tlnp 2>/dev/null | awk '{print $4}' | grep -qE ":${p}$"; then
+            found+=("$p")
+            [[ ${#found[@]} -ge $count ]] && break
+        fi
+    done
+    echo "${found[@]}"
+}
+
+build_image() {
+    echo "[*] Building image '$IMAGE_NAME'..."
+    docker build -t "$IMAGE_NAME" "$WORKSPACE/.devcontainer"
+}
+
+if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
+    build_image
+fi
+
+get_state() {
+    local status
+    if status=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null) && [[ -n "$status" ]]; then
+        echo "$status"
+    else
+        echo "missing"
+    fi
+}
+STATE=$(get_state)
+
+case "$STATE" in
+    running)
+        echo "[*] Attaching to running container '$CONTAINER_NAME'..."
+        ;;
+    exited|created|paused)
+        echo "[*] Starting stopped container '$CONTAINER_NAME'..."
+        docker start "$CONTAINER_NAME"
+        ;;
+    missing)
+        read -ra FREE_PORTS < <(find_free_ports 3)
+        PORT_FLAGS=()
+        for p in "${FREE_PORTS[@]}"; do PORT_FLAGS+=(-p "${p}:${p}"); done
+        echo "[*] Creating container '$CONTAINER_NAME'${FREE_PORTS:+ (ports: ${FREE_PORTS[*]})}..."
+        docker run -d \
+            --name "$CONTAINER_NAME" \
+            --cap-add=SYS_PTRACE \
+            --security-opt seccomp=unconfined \
+            "${PORT_FLAGS[@]}" \
+            -v "$WORKSPACE:/workspace" \
+            -v "$HOME/.claude:/home/sandbox/.claude" \
+            -v "$HOME/.claude.json:/home/sandbox/.claude.json" \
+            -v "$HOME/.codex:/home/sandbox/.codex" \
+            -e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}" \
+            -e "OPENAI_API_KEY=${OPENAI_API_KEY:-}" \
+            -w /workspace \
+            "$IMAGE_NAME" \
+            sleep infinity
+        ;;
+    *)
+        echo "[!] Unexpected container state: $STATE. Removing and recreating..."
+        docker rm -f "$CONTAINER_NAME"
+        exec "$0" "$@"
+        ;;
+esac
+
+echo "[*] Opening terminal in '$CONTAINER_NAME'..."
+docker exec -it "$CONTAINER_NAME" bash
+"""
+
+CONTAINER_SH = r"""#!/usr/bin/env bash
+# Interactive management for this project's AI container (Claude Code + Codex).
+# Usage: ./container.sh [start|stop|shell|status|rebuild|logs]
+
+set -euo pipefail
+
+WORKSPACE="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_NAME="$(basename "$WORKSPACE")"
+PROJECT_SLUG="$(printf '%s' "$PROJECT_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g; s/-\{2,\}/-/g; s/^-//; s/-$//')"
+PROJECT_SLUG="${PROJECT_SLUG:-workspace}"
+PROJECT_HASH="$(printf '%s' "$WORKSPACE" | sha256sum | cut -c1-12)"
+IMAGE_NAME="ai-container-${PROJECT_SLUG}-${PROJECT_HASH}"
+CONTAINER_NAME="$IMAGE_NAME"
+
+# ── helpers ────────────────────────────────────────────────────────────────
+
+find_free_ports() {
+    local count=$1 found=()
+    for p in $(seq 3000 3030); do
+        if ! ss -tlnp 2>/dev/null | awk '{print $4}' | grep -qE ":${p}$"; then
+            found+=("$p")
+            [[ ${#found[@]} -ge $count ]] && break
+        fi
+    done
+    echo "${found[@]}"
+}
+
+container_state() {
+    local status
+    if status=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null) && [[ -n "$status" ]]; then
+        echo "$status"
+    else
+        echo "missing"
+    fi
+}
+
+build_image() {
+    echo "[*] Building image '$IMAGE_NAME'..."
+    docker build -t "$IMAGE_NAME" "$WORKSPACE/.devcontainer"
+}
+
+ensure_running() {
+    if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
+        build_image
+    fi
+    local state
+    state=$(container_state)
+    case "$state" in
+        running) ;;
+        exited|created|paused)
+            echo "[*] Starting container..."
+            docker start "$CONTAINER_NAME" > /dev/null
+            ;;
+        missing)
+            read -ra FREE_PORTS < <(find_free_ports 3)
+            PORT_FLAGS=()
+            for p in "${FREE_PORTS[@]}"; do PORT_FLAGS+=(-p "${p}:${p}"); done
+            echo "[*] Creating container${FREE_PORTS:+ (ports: ${FREE_PORTS[*]})}..."
+            docker run -d \
+                --name "$CONTAINER_NAME" \
+                --cap-add=SYS_PTRACE \
+                --security-opt seccomp=unconfined \
+                "${PORT_FLAGS[@]}" \
+                -v "$WORKSPACE:/workspace" \
+                -v "$HOME/.claude:/home/sandbox/.claude" \
+                -v "$HOME/.claude.json:/home/sandbox/.claude.json" \
+                -v "$HOME/.codex:/home/sandbox/.codex" \
+                -e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}" \
+                -e "OPENAI_API_KEY=${OPENAI_API_KEY:-}" \
+                -w /workspace \
+                "$IMAGE_NAME" \
+                sleep infinity > /dev/null
+            ;;
+        *)
+            echo "[!] Unexpected state '$state'. Removing and recreating..."
+            docker rm -f "$CONTAINER_NAME" > /dev/null
+            ensure_running
+            ;;
+    esac
+}
+
+print_status() {
+    local state
+    state=$(container_state)
+    local image_exists="no"
+    docker image inspect "$IMAGE_NAME" &>/dev/null && image_exists="yes"
+    echo "  Image:     $IMAGE_NAME  (exists: $image_exists)"
+    echo "  Container: $CONTAINER_NAME  (state: $state)"
+}
+
+# ── commands ───────────────────────────────────────────────────────────────
+
+cmd_start()  { ensure_running; echo "[*] Container is running."; }
+
+cmd_stop() {
+    local state
+    state=$(container_state)
+    case "$state" in
+        missing) echo "[*] Container does not exist." ;;
+        exited)  echo "[*] Container is already stopped." ;;
+        *)
+            echo "[*] Stopping container..."
+            docker stop "$CONTAINER_NAME" > /dev/null
+            echo "[*] Stopped."
+            ;;
+    esac
+}
+
+cmd_shell()  { ensure_running; echo "[*] Opening terminal..."; docker exec -it "$CONTAINER_NAME" bash; }
+cmd_status() { echo; print_status; echo; }
+
+cmd_rebuild() {
+    echo "[*] Removing container and image..."
+    docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+    docker rmi -f "$IMAGE_NAME"   2>/dev/null || true
+    build_image
+    echo "[*] Done. Run './container.sh start' or './container.sh shell' to use it."
+}
+
+cmd_logs() { docker logs --tail=50 -f "$CONTAINER_NAME"; }
+
+# ── interactive menu ────────────────────────────────────────────────────────
+
+interactive_menu() {
+    while true; do
+        echo
+        echo "  AI Sandbox — Container Manager"
+        echo "  ================================"
+        print_status
+        echo
+        echo "  1) Open terminal (shell)"
+        echo "  2) Start container"
+        echo "  3) Stop container"
+        echo "  4) Rebuild image"
+        echo "  5) Show logs"
+        echo "  q) Quit"
+        echo
+        read -rp "  Choice: " choice
+        case "$choice" in
+            1) cmd_shell ;;
+            2) cmd_start ;;
+            3) cmd_stop ;;
+            4) cmd_rebuild ;;
+            5) cmd_logs ;;
+            q|Q) echo "Bye."; exit 0 ;;
+            *) echo "  Unknown option." ;;
+        esac
+    done
+}
+
+# ── entry point ─────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+    start)   cmd_start ;;
+    stop)    cmd_stop ;;
+    shell)   cmd_shell ;;
+    status)  cmd_status ;;
+    rebuild) cmd_rebuild ;;
+    logs)    cmd_logs ;;
+    "")      interactive_menu ;;
+    *)
+        echo "Usage: $0 [start|stop|shell|status|rebuild|logs]"
+        echo "       $0          (interactive menu)"
+        exit 1
+        ;;
+esac
+"""
+
+if __name__ == '__main__':
+    main()
