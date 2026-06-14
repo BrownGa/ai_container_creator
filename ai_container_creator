@@ -53,6 +53,15 @@ def main() -> None:
     print(f"[*] Container: {container_name}")
     print()
 
+    ssh_key = Path.home() / '.ssh' / 'ai_container_id_ed25519'
+    if not ssh_key.exists():
+        print(f"[!] SSH key not found: {ssh_key}")
+        print(f"    This key must already be registered with a GitHub account.")
+        print(f"    Generate it manually, add the public key to GitHub, then re-run.")
+        sys.exit(1)
+    print(f"[*] SSH key: {ssh_key}")
+    print()
+
     (workspace / '.devcontainer').mkdir(exist_ok=True)
     (workspace / '.devcontainer' / 'Dockerfile').write_text(DOCKERFILE)
     (workspace / '.devcontainer' / 'devcontainer.json').write_text(DEVCONTAINER_JSON)
@@ -87,7 +96,7 @@ DOCKERFILE = r"""FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
-    curl wget git \
+    curl wget git openssh-client \
     python3 python3-pip python3-venv python3-dev \
     gcc g++ make cmake build-essential \
     sudo bash vim nano less \
@@ -125,6 +134,16 @@ RUN mkdir -p /home/sandbox/.local/bin \
 RUN echo 'alias claude="claude --dangerously-skip-permissions"' >> /home/sandbox/.bashrc \
     && echo 'export PS1="\[\033[1;31m\][sandbox]\[\033[0m\] \w \$ "' >> /home/sandbox/.bashrc
 
+RUN mkdir -p /home/sandbox/.ssh \
+    && touch /home/sandbox/.ssh/known_hosts \
+    && (ssh-keyscan -H github.com >> /home/sandbox/.ssh/known_hosts 2>/dev/null || true) \
+    && printf 'Host github.com\n    StrictHostKeyChecking accept-new\n    IdentityFile ~/.ssh/id_ed25519\n' \
+       > /home/sandbox/.ssh/config \
+    && chmod 700 /home/sandbox/.ssh \
+    && chmod 600 /home/sandbox/.ssh/config \
+    && chmod 644 /home/sandbox/.ssh/known_hosts \
+    && chown -R sandbox:sandbox /home/sandbox/.ssh
+
 USER sandbox
 WORKDIR /workspace
 """
@@ -137,7 +156,8 @@ DEVCONTAINER_JSON = """{
     "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
     "source=${localEnv:HOME}/.claude,target=/home/sandbox/.claude,type=bind,consistency=cached",
     "source=${localEnv:HOME}/.claude.json,target=/home/sandbox/.claude.json,type=bind,consistency=cached",
-    "source=${localEnv:HOME}/.codex,target=/home/sandbox/.codex,type=bind,consistency=cached"
+    "source=${localEnv:HOME}/.codex,target=/home/sandbox/.codex,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.ssh/ai_container_id_ed25519,target=/home/sandbox/.ssh/id_ed25519,type=bind,readonly"
   ],
   "workspaceFolder": "/workspace",
   "forwardPorts": [3000, 3001, 3002, 3003, 3004, 3005, 3006, 3007, 3008, 3009, 3010, 3011, 3012, 3013, 3014, 3015, 3016, 3017, 3018, 3019, 3020, 3021, 3022, 3023, 3024, 3025, 3026, 3027, 3028, 3029, 3030],
@@ -171,6 +191,14 @@ PROJECT_SLUG="${PROJECT_SLUG:-workspace}"
 PROJECT_HASH="$(printf '%s' "$WORKSPACE" | sha256sum | cut -c1-12)"
 IMAGE_NAME="ai-container-${PROJECT_SLUG}-${PROJECT_HASH}"
 CONTAINER_NAME="$IMAGE_NAME"
+SSH_KEY="$HOME/.ssh/ai_container_id_ed25519"
+
+if [[ ! -f "$SSH_KEY" ]]; then
+    echo "[!] SSH key not found: $SSH_KEY"
+    echo "    Git operations inside the container require this key."
+    echo "    Generate it, register the public key with GitHub, then retry."
+    exit 1
+fi
 
 find_free_ports() {
     local count=$1 found=()
@@ -208,7 +236,11 @@ case "$STATE" in
         ;;
     exited|created|paused)
         echo "[*] Starting stopped container '$CONTAINER_NAME'..."
-        docker start "$CONTAINER_NAME"
+        if ! docker start "$CONTAINER_NAME" > /dev/null 2>&1; then
+            echo "[!] Start failed (port conflict). Removing and recreating..."
+            docker rm -f "$CONTAINER_NAME" > /dev/null
+            exec "$0" "$@"
+        fi
         ;;
     missing)
         read -ra FREE_PORTS < <(find_free_ports 3)
@@ -224,6 +256,7 @@ case "$STATE" in
             -v "$HOME/.claude:/home/sandbox/.claude" \
             -v "$HOME/.claude.json:/home/sandbox/.claude.json" \
             -v "$HOME/.codex:/home/sandbox/.codex" \
+            -v "$SSH_KEY:/home/sandbox/.ssh/id_ed25519:ro" \
             -e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}" \
             -e "OPENAI_API_KEY=${OPENAI_API_KEY:-}" \
             -w /workspace \
@@ -254,6 +287,7 @@ PROJECT_SLUG="${PROJECT_SLUG:-workspace}"
 PROJECT_HASH="$(printf '%s' "$WORKSPACE" | sha256sum | cut -c1-12)"
 IMAGE_NAME="ai-container-${PROJECT_SLUG}-${PROJECT_HASH}"
 CONTAINER_NAME="$IMAGE_NAME"
+SSH_KEY="$HOME/.ssh/ai_container_id_ed25519"
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
@@ -283,6 +317,12 @@ build_image() {
 }
 
 ensure_running() {
+    if [[ ! -f "$SSH_KEY" ]]; then
+        echo "[!] SSH key not found: $SSH_KEY"
+        echo "    Git operations inside the container require this key."
+        echo "    Generate it, register the public key with GitHub, then retry."
+        exit 1
+    fi
     if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
         build_image
     fi
@@ -292,7 +332,11 @@ ensure_running() {
         running) ;;
         exited|created|paused)
             echo "[*] Starting container..."
-            docker start "$CONTAINER_NAME" > /dev/null
+            if ! docker start "$CONTAINER_NAME" > /dev/null 2>&1; then
+                echo "[!] Start failed (port conflict). Removing and recreating..."
+                docker rm -f "$CONTAINER_NAME" > /dev/null
+                ensure_running
+            fi
             ;;
         missing)
             read -ra FREE_PORTS < <(find_free_ports 3)
@@ -308,6 +352,7 @@ ensure_running() {
                 -v "$HOME/.claude:/home/sandbox/.claude" \
                 -v "$HOME/.claude.json:/home/sandbox/.claude.json" \
                 -v "$HOME/.codex:/home/sandbox/.codex" \
+                -v "$SSH_KEY:/home/sandbox/.ssh/id_ed25519:ro" \
                 -e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}" \
                 -e "OPENAI_API_KEY=${OPENAI_API_KEY:-}" \
                 -w /workspace \
