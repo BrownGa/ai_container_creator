@@ -17,7 +17,6 @@ The container runs as a non-root `sandbox` user with your project mounted at `/w
 - Docker
 - Python 3
 - An SSH key at `~/.ssh/ai_container_id_ed25519` registered with GitHub (for git operations inside the container)
-- `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` in your environment (optional — see below)
 
 ## Installation
 
@@ -81,9 +80,4 @@ Then add the public key (`~/.ssh/ai_container_id_ed25519.pub`) to your GitHub ac
 
 ## Environment variables
 
-| Variable | Purpose |
-|---|---|
-| `ANTHROPIC_API_KEY` | Passed to Claude Code if set. Optional — Claude Code also supports browser-based login. |
-| `OPENAI_API_KEY` | Passed to Codex if set. Required if you want to use Codex. |
-
-Both are forwarded from your host environment into the container at runtime.
+`ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are forwarded from your host environment into the container if set, but neither is required — credentials are already available inside the container via the mounted `~/.claude` and `~/.codex` directories.
