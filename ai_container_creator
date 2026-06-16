@@ -113,10 +113,6 @@ RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install ipython requests
 
-# cai: claude with all permissions skipped (safe inside this sandbox)
-RUN printf '#!/bin/bash\nexec claude --dangerously-skip-permissions "$@"\n' \
-    > /usr/local/bin/cai && chmod +x /usr/local/bin/cai
-
 # codex: bypass internal approvals/sandbox inside the container
 RUN CODEX_REAL="$(readlink -f "$(command -v codex)")" \
     && printf '#!/bin/bash\nexec node "%s" --dangerously-bypass-approvals-and-sandbox "$@"\n' "$CODEX_REAL" \

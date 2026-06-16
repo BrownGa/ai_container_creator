@@ -17,7 +17,7 @@ The container runs as a non-root `sandbox` user with your project mounted at `/w
 - Docker
 - Python 3
 - An SSH key at `~/.ssh/ai_container_id_ed25519` registered with GitHub (for git operations inside the container)
-- `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` set in your environment
+- `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` in your environment (optional — see below)
 
 ## Installation
 
@@ -60,15 +60,14 @@ This removes the container, image, and all generated files from the project dire
 
 ## Inside the container
 
-Both `claude` and `cai` are available:
+Both `claude` and `codex` are available with permissions/approvals bypassed automatically:
 
 ```bash
-claude          # Claude Code (standard)
-cai             # Claude Code with --dangerously-skip-permissions (skip all prompts)
-codex           # OpenAI Codex
+claude    # Claude Code
+codex     # OpenAI Codex
 ```
 
-Up to 3 free ports in the range `3000–3030` are forwarded to the host automatically when the container starts.
+When using the shell scripts, up to 3 free ports in the range `3000–3030` are forwarded to the host. When using VS Code devcontainer, all ports in that range are forwarded.
 
 ## SSH key setup
 
@@ -84,7 +83,7 @@ Then add the public key (`~/.ssh/ai_container_id_ed25519.pub`) to your GitHub ac
 
 | Variable | Purpose |
 |---|---|
-| `ANTHROPIC_API_KEY` | Required for Claude Code |
-| `OPENAI_API_KEY` | Required for OpenAI Codex |
+| `ANTHROPIC_API_KEY` | Passed to Claude Code if set. Optional — Claude Code also supports browser-based login. |
+| `OPENAI_API_KEY` | Passed to Codex if set. Required if you want to use Codex. |
 
-Both are passed from your host environment into the container at runtime.
+Both are forwarded from your host environment into the container at runtime.
